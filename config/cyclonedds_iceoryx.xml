@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  emb_bus: CycloneDDS + Iceoryx 共享内存中间件配置
+  
+  使用方式：
+    export CYCLONEDDS_URI=file:///path/to/cyclonedds_iceoryx.xml
+  
+  该配置启用 Iceoryx 作为共享内存传输层，
+  实现进程间零拷贝数据传递。
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config">
+  <Domain id="any">
+    <!-- 启用 Iceoryx 共享内存传输 -->
+    <Internal>
+      <MinimumSocketReceiveBufferSize>1MB</MinimumSocketReceiveBufferSize>
+    </Internal>
+
+    <!-- 共享内存配置 -->
+    <SharedMemory>
+      <Enable>true</Enable>
+      <!-- Iceoryx 服务发现 -->
+      <LogLevel>info</LogLevel>
+    </SharedMemory>
+
+    <!-- 域 ID，同域内节点可发现彼此 -->
+    <DomainId>0</DomainId>
+  </Domain>
+</CycloneDDS>
