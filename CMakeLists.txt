@@ -28,10 +28,24 @@ if(EMB_BUS_SANITIZER)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-# 核心库（thread_affinity.cpp 实现 CPU 绑核与实时调度）
-add_library(${PROJECT_NAME}
+# 核心库源文件
+set(EMB_BUS_SOURCES
   src/thread_affinity.cpp
 )
+
+# 检测 ROS2 环境（可选依赖）
+find_package(rclcpp QUIET)
+if(rclcpp_FOUND)
+  message(STATUS "[emb_bus] ROS2 detected, enabling zero_copy_publisher.cpp (RMW diagnostics)")
+  list(APPEND EMB_BUS_SOURCES src/zero_copy_publisher.cpp)
+  find_package(rmw REQUIRED)
+  find_package(rosidl_runtime_cpp REQUIRED)
+else()
+  message(STATUS "[emb_bus] ROS2 not found, skipping zero_copy_publisher.cpp (standalone mode)")
+endif()
+
+# 核心库
+add_library(${PROJECT_NAME} ${EMB_BUS_SOURCES})
 
 # 创建 ALIAS target，支持 emb_bus::emb_bus 语法
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
@@ -43,6 +57,11 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 
 # 设置 C++17 标准
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
+
+# ROS2 依赖链接
+if(rclcpp_FOUND)
+  target_link_libraries(${PROJECT_NAME} PUBLIC rclcpp::rclcpp)
+endif()
 
 # 安装头文件
 install(DIRECTORY include/
