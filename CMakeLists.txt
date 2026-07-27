@@ -19,6 +19,15 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# Sanitizer 支持（开发/测试时开启）
+# 用法: cmake -DEMB_BUS_SANITIZER=ON ..
+option(EMB_BUS_SANITIZER "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(EMB_BUS_SANITIZER)
+  message(STATUS "[emb_bus] Sanitizer enabled (ASan + UBSan)")
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 # 核心库（thread_affinity.cpp 实现 CPU 绑核与实时调度）
 add_library(${PROJECT_NAME}
   src/thread_affinity.cpp

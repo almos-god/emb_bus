@@ -48,8 +48,13 @@ class AlignedAllocator {
 
 /// POSIX 共享内存池（跨进程）
 ///
-/// 使用 shm_open + mmap 创建 System V 共享内存段，
+/// 使用 shm_open + mmap 创建 POSIX 共享内存段，
 /// 所有映射到同一段的进程可零拷贝访问数据。
+///
+/// RAII 语义：
+/// - 只有 creator（owner_=true）在析构时执行 shm_unlink
+/// - 打开已有段（owner_=false）的进程只负责 munmap + close
+/// - 支持移动语义，禁止拷贝
 class ShmPool {
  public:
   /// 创建或打开共享内存池
@@ -59,19 +64,19 @@ class ShmPool {
   ShmPool(const std::string& name, size_t size, bool create = true)
       : name_(name), size_(size), owner_(create) {
     if (create) {
-      // 创建并截断
       fd_ = shm_open(name.c_str(), O_CREAT | O_RDWR | O_EXCL, 0666);
       if (fd_ < 0) {
-        // 可能已存在，尝试打开
+        // 已存在，降级为打开模式
         fd_ = shm_open(name.c_str(), O_RDWR, 0666);
         if (fd_ < 0) {
           throw std::runtime_error("shm_open failed for: " + name);
         }
-        owner_ = false;
+        owner_ = false;  // 非创建者，析构时不 unlink
       } else {
         if (ftruncate(fd_, static_cast<off_t>(size)) != 0) {
           close(fd_);
-          shm_unlink(name.c_str());
+          fd_ = -1;
+          shm_unlink(name.c_str());  // creator 负责清理
           throw std::runtime_error("ftruncate failed for: " + name);
         }
       }
@@ -82,30 +87,48 @@ class ShmPool {
       }
     }
 
-    // mmap 映射
     ptr_ = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (ptr_ == MAP_FAILED) {
+      ptr_ = nullptr;
       close(fd_);
+      fd_ = -1;
       if (owner_) shm_unlink(name.c_str());
       throw std::runtime_error("mmap failed for: " + name);
     }
   }
 
-  ~ShmPool() {
-    if (ptr_ != nullptr && ptr_ != MAP_FAILED) {
-      munmap(ptr_, size_);
-    }
-    if (fd_ >= 0) {
-      close(fd_);
-    }
-    if (owner_) {
-      shm_unlink(name_.c_str());
-    }
-  }
+  ~ShmPool() { release(); }
 
   // 禁止拷贝
   ShmPool(const ShmPool&) = delete;
   ShmPool& operator=(const ShmPool&) = delete;
+
+  // 移动语义：转移所有权
+  ShmPool(ShmPool&& other) noexcept
+      : name_(std::move(other.name_)),
+        size_(other.size_),
+        fd_(other.fd_),
+        ptr_(other.ptr_),
+        owner_(other.owner_) {
+    other.fd_ = -1;
+    other.ptr_ = nullptr;
+    other.owner_ = false;
+  }
+
+  ShmPool& operator=(ShmPool&& other) noexcept {
+    if (this != &other) {
+      release();
+      name_ = std::move(other.name_);
+      size_ = other.size_;
+      fd_ = other.fd_;
+      ptr_ = other.ptr_;
+      owner_ = other.owner_;
+      other.fd_ = -1;
+      other.ptr_ = nullptr;
+      other.owner_ = false;
+    }
+    return *this;
+  }
 
   /// 获取共享内存基地址
   void* data() { return ptr_; }
@@ -117,7 +140,26 @@ class ShmPool {
   /// 获取名称
   const std::string& name() const { return name_; }
 
+  /// 是否为创建者（负责 shm_unlink）
+  bool is_owner() const { return owner_; }
+
  private:
+  /// 统一资源释放
+  void release() noexcept {
+    if (ptr_ != nullptr) {
+      munmap(ptr_, size_);
+      ptr_ = nullptr;
+    }
+    if (fd_ >= 0) {
+      close(fd_);
+      fd_ = -1;
+    }
+    if (owner_) {
+      shm_unlink(name_.c_str());
+      owner_ = false;
+    }
+  }
+
   std::string name_;
   size_t size_;
   int fd_ = -1;
