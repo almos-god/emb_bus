@@ -19,15 +19,21 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# 核心库（header-only + 少量实现）
+# 核心库（thread_affinity.cpp 实现 CPU 绑核与实时调度）
 add_library(${PROJECT_NAME}
   src/thread_affinity.cpp
 )
+
+# 创建 ALIAS target，支持 emb_bus::emb_bus 语法
+add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+
+# 设置 C++17 标准
+target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
 
 # 安装头文件
 install(DIRECTORY include/
