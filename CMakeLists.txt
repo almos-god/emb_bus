@@ -111,6 +111,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_lockfree_queue ${PROJECT_NAME} GTest::GTest GTest::Main)
   add_test(NAME test_lockfree_queue COMMAND test_lockfree_queue)
   
+  add_executable(test_zero_copy_ipc tests/test_zero_copy_ipc.cpp)
+  target_link_libraries(test_zero_copy_ipc ${PROJECT_NAME} GTest::GTest GTest::Main)
+  add_test(NAME test_zero_copy_ipc COMMAND test_zero_copy_ipc)
+
   add_executable(benchmark_latency tests/benchmark_latency.cpp)
   target_link_libraries(benchmark_latency ${PROJECT_NAME})
 endif()

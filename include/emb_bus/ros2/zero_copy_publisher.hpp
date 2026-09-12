@@ -12,8 +12,11 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <atomic>
+#include <cctype>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "emb_bus/core/shm_pool_allocator.hpp"
@@ -26,7 +29,11 @@ namespace emb_bus {
 /// - 轨道1: ROS2 LoanedMessage（DDS 零拷贝，如 Iceoryx/FastDDS SHM）
 /// - 轨道2: ShmChunkPool 兜底（进程内共享内存，当 DDS 不支持 loan 时）
 ///
-/// 优先级：LoanedMessage > ShmChunkPool > 普通拷贝
+/// 优先级：LoanedMessage > ShmPool > 普通拷贝
+///
+/// 注意：轨道2 通过共享内存裸拷贝传输，仅对 trivially copyable 类型启用；
+/// 非平凡类型（如含 std::vector/std::string 的 ROS 消息）编译期自动降级为
+/// 轨道3 标准拷贝，避免对非平凡对象 memcpy/裸内存构造的未定义行为。
 template <typename MsgT>
 class ZeroCopyPublisher {
  public:
@@ -48,24 +55,31 @@ class ZeroCopyPublisher {
                     const rclcpp::QoS& qos, size_t shm_pool_size = 0)
       : node_(node), topic_(topic) {
     pub_ = node->create_publisher<MsgT>(topic, qos);
-    
+
     // 检测 DDS 是否支持 LoanedMessage
     if (pub_->can_loan_messages()) {
       mode_ = PublishMode::kLoanedMessage;
-      RCLCPP_DEBUG(node_->get_logger(), 
-                   "ZeroCopyPublisher[%s]: Using LoanedMessage (DDS zero-copy)", 
+      RCLCPP_DEBUG(node_->get_logger(),
+                   "ZeroCopyPublisher[%s]: Using LoanedMessage (DDS zero-copy)",
                    topic.c_str());
-    } else if (shm_pool_size > 0) {
-      // 启用 ShmChunkPool 兜底
+    } else if (shm_pool_size > 0 && std::is_trivially_copyable_v<MsgT>) {
+      // 启用 ShmChunkPool 兜底（仅限 trivially copyable 类型）
       init_shm_pool(shm_pool_size);
       mode_ = PublishMode::kShmPool;
-      RCLCPP_DEBUG(node_->get_logger(), 
-                   "ZeroCopyPublisher[%s]: Using ShmChunkPool fallback", 
+      RCLCPP_DEBUG(node_->get_logger(),
+                   "ZeroCopyPublisher[%s]: Using ShmChunkPool fallback",
                    topic.c_str());
+    } else if (shm_pool_size > 0) {
+      // 非平凡类型不能走共享内存裸拷贝轨道，自动降级
+      mode_ = PublishMode::kStandardCopy;
+      RCLCPP_WARN(node_->get_logger(),
+                  "ZeroCopyPublisher[%s]: ShmChunkPool disabled, message type is "
+                  "not trivially copyable, using standard copy",
+                  topic.c_str());
     } else {
       mode_ = PublishMode::kStandardCopy;
-      RCLCPP_WARN(node_->get_logger(), 
-                  "ZeroCopyPublisher[%s]: DDS does not support loan, using standard copy", 
+      RCLCPP_WARN(node_->get_logger(),
+                  "ZeroCopyPublisher[%s]: DDS does not support loan, using standard copy",
                   topic.c_str());
     }
   }
@@ -109,24 +123,28 @@ class ZeroCopyPublisher {
         // Loan 失败，降级到 ShmPool 或标准拷贝
       }
     }
-    
+
     if (mode_ == PublishMode::kShmPool && shm_pool_) {
       // 轨道2: ShmChunkPool
-      auto* chunk = get_next_shm_chunk();
-      if (chunk) {
-        fill_fn(chunk);
-        // 拷贝到 ROS2 消息并发布
-        MsgT msg;
-        std::memcpy(&msg, chunk, sizeof(MsgT));
-        pub_->publish(msg);
-        shm_count_.fetch_add(1, std::memory_order_relaxed);
-        return PublishMode::kShmPool;
+      // 仅对 trivially copyable 类型可达（构造期已保证），
+      // 因此对共享内存 chunk 的裸读写与 memcpy 是安全的。
+      if constexpr (std::is_trivially_copyable_v<MsgT>) {
+        auto* chunk = get_next_shm_chunk();
+        if (chunk) {
+          fill_fn(*chunk);
+          // chunk -> 栈上消息（trivially copyable 的字节拷贝，合法）
+          MsgT msg;
+          std::memcpy(&msg, chunk, sizeof(MsgT));
+          pub_->publish(msg);
+          shm_count_.fetch_add(1, std::memory_order_relaxed);
+          return PublishMode::kShmPool;
+        }
       }
     }
-    
+
     // 轨道3: 标准拷贝
     MsgT msg;
-    fill_fn(&msg);
+    fill_fn(msg);
     pub_->publish(msg);
     copy_count_.fetch_add(1, std::memory_order_relaxed);
     return PublishMode::kStandardCopy;
@@ -165,19 +183,19 @@ class ZeroCopyPublisher {
   void init_shm_pool(size_t pool_size) {
     // 创建进程内共享内存池
     std::string shm_name = "/emb_bus_pub_" + topic_;
-    // 替换非法字符
+    // 替换非法字符（isalnum 参数必须为 unsigned char，避免负值 char 的 UB）
     for (auto& c : shm_name) {
       if (c == '/') continue;
-      if (!std::isalnum(c)) c = '_';
+      if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
     }
-    
+
     try {
       shm_pool_ = std::make_unique<ShmPool>(shm_name, pool_size * sizeof(MsgT), true);
       shm_pool_capacity_ = pool_size;
       shm_write_index_ = 0;
     } catch (const std::exception& e) {
-      RCLCPP_WARN(node_->get_logger(), 
-                  "Failed to create ShmPool for topic [%s]: %s", 
+      RCLCPP_WARN(node_->get_logger(),
+                  "Failed to create ShmPool for topic [%s]: %s",
                   topic_.c_str(), e.what());
       mode_ = PublishMode::kStandardCopy;
     }

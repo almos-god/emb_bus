@@ -1,0 +1,56 @@
+# emb_bus CI
+# 两种模式：独立构建（无 ROS2）与 ROS2 模式（完整测试）
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  standalone:
+    name: standalone-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build (no ROS2)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build -j$(nproc)
+
+  ros2:
+    name: ros2-jazzy-tests
+    runs-on: ubuntu-24.04
+    container: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build
+        run: |
+          . /opt/ros/jazzy/setup.sh
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DBUILD_TESTING=ON
+          cmake --build build -j$(nproc)
+      - name: Tests
+        run: |
+          . /opt/ros/jazzy/setup.sh
+          cd build && ctest --output-on-failure
+
+  sanitizer:
+    name: asan-ubsan-tests
+    runs-on: ubuntu-24.04
+    container: ros:jazzy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure & Build (ASan+UBSan)
+        run: |
+          . /opt/ros/jazzy/setup.sh
+          cmake -S . -B build-san \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DEMB_BUS_ENABLE_SANITIZERS=ON \
+            -DEMB_BUS_BUILD_TESTS=ON
+          cmake --build build-san -j$(nproc)
+      - name: Tests under sanitizers
+        run: |
+          . /opt/ros/jazzy/setup.sh
+          cd build-san && ctest --output-on-failure
